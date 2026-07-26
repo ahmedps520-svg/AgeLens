@@ -430,6 +430,8 @@
           <small id="workStep" aria-live="polite">Locating a face</small>
         </div>
       </div>
+      <!-- first run pulls ~800kb of weights; never leave the user with no way out -->
+      <button class="btn btn-ghost btn-sm" id="btnAbort" type="button" style="margin-top:14px">Cancel</button>
     </section>
 
     <!-- ── RESULT ──────────────────────────────────────── -->
@@ -528,15 +530,26 @@
     "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js",
     "https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"
   ];
+  // Weight mirrors. These are probed at runtime (see resolveBase) instead of being
+  // trusted blindly: jsDelivr's /gh/ path needs a real git TAG, and the npm version
+  // and git tags do not track each other in this project.
   const MODEL_URLS = [
-    "https://cdn.jsdelivr.net/gh/vladmandic/face-api@1.7.15/model",
-    "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights",
-    "https://raw.githubusercontent.com/vladmandic/face-api/master/model"
+    "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model",
+    "https://cdn.jsdelivr.net/gh/vladmandic/face-api@1.7.12/model",
+    "https://raw.githubusercontent.com/vladmandic/face-api/master/model",
+    "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights"
   ];
+  const PROBE_FILE = "/age_gender_model-weights_manifest.json";
+
+  const T_SCRIPT = 20000;   // ms to fetch the library
+  const T_PROBE  = 7000;    // ms per mirror probe
+  const T_NET    = 45000;   // ms per neural net download
+  const T_TOTAL  = 60000;   // ms for a whole scan before we admit defeat
   // Bigger source = more real detail survives in the extracted face crop, which is
   // what the age net actually sees. Detectors resize internally, so this costs little.
-  const MAX_EDGE = 960;
+  const MAX_EDGE = 720;
   const MIN_SUSPENSE = 1800;  // ms floor for "Analyzing…"; real inference usually exceeds it
+  const TTA_BUDGET = 1500;    // if the first pass is slower than this, skip the mirror pass
   const SMALL_FACE = 90;      // px of face width below which the read gets a caveat
   const MODEL_MAE = 4.5;      // published mean absolute error of the age net, in years
 
@@ -574,6 +587,18 @@
   const announce = (m) => { live.textContent = m; };
 
   /* ── model loading ──────────────────────────────────────────────────── */
+  // Nothing on the network is allowed to hang forever. A stalled mobile connection
+  // does not reject on its own, so every await below is bounded.
+  function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+      Promise.resolve(promise).finally(() => clearTimeout(timer)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timed out: " + label)), ms);
+      })
+    ]);
+  }
+
   function loadScript(src) {
     return new Promise((resolve, reject) => {
       const s = document.createElement("script");
@@ -588,10 +613,32 @@
     if (window.faceapi) return;
     let last;
     for (const url of LIB_URLS) {
-      try { await loadScript(url); if (window.faceapi) return; }
-      catch (e) { last = e; }
+      try {
+        await withTimeout(loadScript(url), T_SCRIPT, "library");
+        if (window.faceapi) return;
+      } catch (e) { last = e; }
     }
     throw last || new Error("face-api.js unavailable");
+  }
+
+  // Find a mirror that actually serves weights, by asking for one small manifest.
+  // Cheaper and far more predictable than discovering a dead mirror separately for
+  // each of four nets, and it survives a CDN path going stale.
+  let modelBase = null;
+  async function resolveBase() {
+    if (modelBase) return modelBase;
+    let last;
+    for (const base of MODEL_URLS) {
+      try {
+        const res = await withTimeout(fetch(base + PROBE_FILE), T_PROBE, "probe " + base);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        await res.json();            // a 404 HTML page fails here, a real manifest does not
+        modelBase = base;
+        return base;
+      } catch (e) { last = e; }
+    }
+    // always mention the mirror so the failure is reported as a model problem
+    throw new Error("no reachable weight mirror (" + ((last && last.message) || "unknown") + ")");
   }
 
   async function pickBackend() {
@@ -603,54 +650,66 @@
     }
   }
 
-  // Tries every weight mirror in turn. Resolves false rather than throwing for the
-  // nets we can do without, so one dead CDN cannot take the whole app down.
+  // Resolves false rather than throwing for the nets we can do without, so one bad
+  // download costs accuracy instead of taking the whole app down.
   async function loadNet(net, label) {
     if (net.isLoaded) return true;
-    for (const base of MODEL_URLS) {
-      try { await net.loadFromUri(base); return true; }
-      catch (_) { /* next mirror */ }
+    try {
+      const base = await resolveBase();
+      await withTimeout(net.loadFromUri(base), T_NET, label);
+      return true;
+    } catch (e) {
+      console.warn("AgeLens: could not load " + label, e);
+      return false;
     }
-    console.warn("AgeLens: could not load " + label);
-    return false;
   }
+
+  // What the analyzing screen is told while it waits on a first-run download.
+  let loadStage = "";
+  const setStage = (text) => { loadStage = text; setPill("loading", text); paintStep(); };
 
   // Core = the smallest set that can produce a real answer (~800kb).
   async function loadCore() {
+    setStage("Fetching the engine…");
     await loadLib();
     await pickBackend();
     const nets = faceapi.nets;
 
-    setPill("loading", "Loading face detector…");
+    setStage("Finding a model mirror…");
+    await resolveBase();
+
+    setStage("Downloading face detector…");
     const detector = await loadNet(nets.tinyFaceDetector, "tinyFaceDetector");
 
-    setPill("loading", "Loading age model…");
+    setStage("Downloading age model…");
     const age = await loadNet(nets.ageGenderNet, "ageGenderNet");
     if (!detector || !age) throw new Error("model weights unavailable");
 
     // Landmarks are what let the age net run on an *aligned* face crop, which is how
     // it was trained. Optional: without it we fall back to the raw detection box.
-    setPill("loading", "Loading face landmarks…");
+    setStage("Downloading face landmarks…");
     await loadNet(nets.faceLandmark68Net, "faceLandmark68Net");
+    loadStage = "";
   }
 
-  // Upgrade = the 5.4MB SSD MobileNet detector. Much tighter boxes than the tiny
-  // detector, so the crop handed to the age net is better framed. Loaded in the
-  // background; scans that happen before it lands just use the tiny detector.
-  async function loadUpgrade() {
-    const ok = await loadNet(faceapi.nets.ssdMobilenetv1, "ssdMobilenetv1");
-    if (ok && pill.dataset.state === "ready") setPill("ready", "High accuracy ready");
-    return ok;
+  // Upgrade = the 5.4MB SSD MobileNet detector. Tighter boxes than the tiny detector,
+  // so the age net gets a better-framed crop. Deliberately NOT started at boot: it
+  // would compete for bandwidth with the first scan on a phone. It begins only once
+  // a result is on screen, and any scan before it lands just uses the tiny detector.
+  let upgradeStarted = false;
+  function startUpgrade() {
+    if (upgradeStarted || !window.faceapi) return;
+    upgradeStarted = true;
+    loadNet(faceapi.nets.ssdMobilenetv1, "ssdMobilenetv1").then((ok) => {
+      if (ok && pill.dataset.state === "ready") setPill("ready", "High accuracy ready");
+    }).catch(() => {});
   }
 
   let ready = null;
   function boot() {
     setPill("loading", "Waking the lens…");
     ready = loadCore().then(
-      () => {
-        setPill("ready", "Lens ready");
-        loadUpgrade().catch(() => {});   // never blocks, never fatal
-      },
+      () => { setPill("ready", "Lens ready"); },
       (err) => { setPill("failed", "Model failed — tap to retry"); throw err; }
     );
     // an unhandled rejection here is expected until someone actually scans
@@ -726,8 +785,8 @@
     stopCamera();
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        // ask for a sharp frame — face detail is what the age net feeds on
-        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1440 } },
+        // comfortably above MAX_EDGE without asking phones for a mode they render slowly
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 960 } },
         audio: false
       });
       video.srcObject = stream;
@@ -907,29 +966,43 @@
   // A single forward pass is noisy; two views of the same face cancel some of that, and
   // their disagreement is a genuine, per-photo signal of how confident the model is.
   async function estimate() {
+    setPipelineStep("Locating a face");
+    const t0 = performance.now();
     let found = await pass(photoWork, false);
-    if (!found || !found.length) found = await pass(photoWork, true);
+    const firstPass = performance.now() - t0;
+
+    if (!found || !found.length) {
+      setPipelineStep("Looking harder");
+      found = await pass(photoWork, true);
+    }
     if (!found || !found.length) return null;
 
     const best = biggest(found);
     const ages = [best.age];
     const males = [maleProb(best)];
 
-    try {
-      const flipped = await pass(makeMirror(photoWork), false);
-      if (flipped && flipped.length) {
-        const other = biggest(flipped);
-        // un-mirror the box so it can be compared in the original coordinate space
-        const ob = other.detection.box;
-        const unflipped = {
-          x: photoWork.width - (ob.x + ob.width), y: ob.y, width: ob.width, height: ob.height
-        };
-        if (iou(best.detection.box, unflipped) > 0.5) {
-          ages.push(other.age);
-          males.push(maleProb(other));
+    // The mirrored cross-check doubles the work. On a device where one pass already
+    // took a while, a second one is the difference between "slow" and "broken", and
+    // a slightly noisier estimate is the better trade.
+    const skipped = firstPass > TTA_BUDGET;
+    if (!skipped) {
+      try {
+        setPipelineStep("Cross-checking the mirror");
+        const flipped = await pass(makeMirror(photoWork), false);
+        if (flipped && flipped.length) {
+          const other = biggest(flipped);
+          // un-mirror the box so it can be compared in the original coordinate space
+          const ob = other.detection.box;
+          const unflipped = {
+            x: photoWork.width - (ob.x + ob.width), y: ob.y, width: ob.width, height: ob.height
+          };
+          if (iou(best.detection.box, unflipped) > 0.5) {
+            ages.push(other.age);
+            males.push(maleProb(other));
+          }
         }
-      }
-    } catch (_) { /* the mirrored view is a bonus, never a requirement */ }
+      } catch (_) { /* the mirrored view is a bonus, never a requirement */ }
+    }
 
     const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
     const age = mean(ages);
@@ -943,6 +1016,7 @@
       age,
       margin,
       samples: ages.length,
+      mirrorSkipped: skipped,   // skipped for speed is not the same as disagreed
       gender: male >= 0.5 ? "male" : "female",
       genderProbability: Math.max(male, 1 - male),
       detection: best.detection,
@@ -950,21 +1024,37 @@
     };
   }
 
+  // The status line now reports what is actually happening. Showing "Reading skin and
+  // shadow" while really stuck on a 5MB download is how a slow scan looks like a hang.
   const STEPS = [
     "Locating a face",
     "Aligning facial landmarks",
     "Reading skin and shadow",
     "Cross-checking the mirror"
   ];
-  function runSteps() {
+  let stepIndex = 0, pipelineStep = "";
+  function paintStep() {
     const el = $("workStep");
-    let i = 0;
-    el.textContent = STEPS[0];
-    clearInterval(stepTimer);
-    stepTimer = setInterval(() => { i = (i + 1) % STEPS.length; el.textContent = STEPS[i]; }, 780);
+    if (!el) return;
+    el.textContent = loadStage || pipelineStep || STEPS[stepIndex];
   }
+  function runSteps() {
+    stepIndex = 0;
+    pipelineStep = "";
+    paintStep();
+    clearInterval(stepTimer);
+    // only cycle the flavour text while the pipeline itself is running
+    stepTimer = setInterval(() => {
+      if (loadStage || pipelineStep) return paintStep();
+      stepIndex = (stepIndex + 1) % STEPS.length;
+      paintStep();
+    }, 780);
+  }
+  const setPipelineStep = (t) => { pipelineStep = t; paintStep(); };
 
+  let scanId = 0;
   async function analyze() {
+    const mine = ++scanId;
     setView("work");
     runSteps();
     announce("Analyzing your photo");
@@ -973,19 +1063,29 @@
 
     let result = null, failure = null;
     try {
-      await (ready || boot());
-      result = await estimate();
+      // One bound over the whole scan: no combination of a stalled download and a
+      // slow device can leave this screen spinning indefinitely.
+      result = await withTimeout((async () => {
+        await (ready || boot());
+        return estimate();
+      })(), T_TOTAL, "scan");
     } catch (err) {
-      failure = (err && /model|script|weights|fetch|network/i.test(String(err.message || err)))
-        ? "model" : "engine";
+      const msg = String((err && err.message) || err);
+      failure = /timed out/i.test(msg) ? "timeout"
+              : /model|script|weights|mirror|fetch|network/i.test(msg) ? "model"
+              : "engine";
+      console.warn("AgeLens: scan failed —", msg);
     }
 
+    if (mine !== scanId) return;        // a reset or a newer scan superseded this one
     await suspense;
+    if (mine !== scanId) return;
     clearInterval(stepTimer);
 
     if (failure) return showError(failure);
     if (!result) return showError("noface");
     showResult(result);
+    startUpgrade();                     // fetch the better detector now, not before
   }
 
   /* ── result ─────────────────────────────────────────────────────────── */
@@ -1073,7 +1173,7 @@
     const reasons = [];
     if (r.detection.box.width < SMALL_FACE) reasons.push("the face is small in frame");
     if (score < 60) reasons.push("the detection was borderline");
-    if (r.samples < 2) reasons.push("the mirrored cross-check did not agree");
+    if (r.samples < 2 && !r.mirrorSkipped) reasons.push("the mirrored cross-check did not agree");
     if (reasons.length) {
       note.hidden = false;
       note.textContent = "Low-confidence read — " + reasons.join(" and ") +
@@ -1093,6 +1193,7 @@
     denied:   ["🎥", "Camera is blocked", "Allow camera access for this site in your browser settings, or upload a photo instead."],
     nocam:    ["📷", "No camera here", "This device or browser will not hand over a camera. Uploading a photo works just as well."],
     model:    ["📡", "Could not load the model", "The AI model is fetched from a CDN on first run. Check your connection and try again."],
+    timeout:  ["🐢", "That took too long", "The model download or the scan stalled. On a slow connection the first run pulls about 800kb — try again, ideally on Wi-Fi."],
     engine:   ["🧠", "The lens got confused", "Something went wrong mid-scan. One more go usually sorts it."],
     filetype: ["🖼️", "That is not an image", "Pick a JPG, PNG, HEIC or WebP photo with a face in it."],
     read:     ["🧩", "Could not read that photo", "The file may be corrupt or in a format this browser cannot decode. Try another one."]
@@ -1148,7 +1249,9 @@
 
   /* ── reset ──────────────────────────────────────────────────────────── */
   function reset() {
+    scanId++;              // orphan any scan still in flight so it cannot draw over us
     clearInterval(stepTimer);
+    pipelineStep = "";
     stopCamera();
     current = null;
     shooting = false;
@@ -1169,6 +1272,7 @@
   $("btnErrUp").addEventListener("click", () => fileInput.click());
   $("btnShoot").addEventListener("click", shoot);
   $("btnCancel").addEventListener("click", reset);
+  $("btnAbort").addEventListener("click", reset);
   $("btnAgain").addEventListener("click", reset);
   $("btnRetry").addEventListener("click", reset);
   $("btnShare").addEventListener("click", share);
