@@ -195,6 +195,26 @@
   .btn-ghost{background:transparent}
   .stack{display:grid; gap:10px}
   .row{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+  /* camera tool row: collapses cleanly when Flip is hidden on single-camera devices */
+  .tools{display:flex; gap:10px}
+  .tools .btn{flex:1 1 0; min-width:0}
+  .btn-sm{padding:12px 10px; font-size:.86rem; gap:7px}
+  .btn-sm svg{width:17px; height:17px}
+  .btn-sm span{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  /* flash armed */
+  #btnFlash[aria-pressed="true"]{
+    color:#ffe27a; border-color:rgba(255,214,102,.45);
+    background:rgba(255,206,84,.10);
+    box-shadow:0 0 20px -6px rgba(255,206,84,.6), inset 0 1px 0 rgba(255,255,255,.10);
+  }
+  #btnFlash[aria-pressed="true"] svg{fill:rgba(255,214,102,.28)}
+
+  /* full-screen white burst used as the front-camera flash */
+  .flashfx{
+    position:fixed; inset:0; z-index:60; pointer-events:none;
+    background:#fff; opacity:0; transition:opacity .1s linear;
+  }
+  .flashfx.on{opacity:.98}
 
   /* ── photo frame ────────────────────────────────────── */
   .frame{
@@ -277,6 +297,12 @@
     border:1px solid var(--line); border-radius:999px; background:rgba(255,255,255,.03);
   }
   .chip b{color:var(--txt); font-weight:700}
+  .chip .pct{opacity:.75}
+  #chipGender b{text-transform:capitalize}
+  .note{
+    margin:-6px 0 16px; padding:0 6px;
+    font-size:.76rem; line-height:1.45; color:#d8b26a; text-align:center; text-wrap:balance;
+  }
 
   /* ── error ──────────────────────────────────────────── */
   .oops{text-align:center; padding:16px 6px 4px}
@@ -323,7 +349,8 @@
     #v-res .age{font-size:clamp(3.4rem,17vw,4.6rem)}
     #v-res .caption{font-size:.98rem}
     #v-res .quip{font-size:.82rem}
-    #v-res .meta{margin:9px 0 12px}
+    #v-res .meta{margin:8px 0 10px; gap:6px}
+    #v-res .chip{padding:4px 9px; font-size:.71rem}
     #v-res .btn{padding:13px 18px}
   }
 </style>
@@ -369,18 +396,22 @@
         <video id="video" playsinline autoplay muted></video>
         <div class="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
       </div>
-      <p class="sub" style="margin:16px 0 14px">Centre your face, find some light, and shoot.</p>
+      <p class="sub" id="camHint" style="margin:16px 0 14px">Centre your face, find some light, and shoot.</p>
       <div class="stack">
         <button class="btn btn-primary" id="btnShoot" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/></svg>
           Capture
         </button>
-        <div class="row">
-          <button class="btn btn-ghost" id="btnFlip" type="button" hidden>
+        <div class="tools">
+          <button class="btn btn-ghost btn-sm" id="btnFlash" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>
+            <span id="flashLabel">Flash off</span>
+          </button>
+          <button class="btn btn-ghost btn-sm" id="btnFlip" type="button" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
             Flip
           </button>
-          <button class="btn btn-ghost" id="btnCancel" type="button">Cancel</button>
+          <button class="btn btn-ghost btn-sm" id="btnCancel" type="button">Cancel</button>
         </div>
       </div>
     </section>
@@ -414,9 +445,12 @@
         <p class="quip" id="quip"></p>
       </div>
       <div class="meta">
-        <span class="chip">Confidence <b id="conf">—</b></span>
+        <span class="chip" id="chipRange">Likely <b id="range">—</b></span>
+        <span class="chip" id="chipGender" hidden><b id="gender">—</b> <span id="genderPct" class="pct"></span></span>
+        <span class="chip">Detection <b id="conf">—</b></span>
         <span class="chip" id="chipFaces" hidden></span>
       </div>
+      <p class="note" id="qualityNote" hidden></p>
       <div class="stack">
         <button class="btn btn-primary" id="btnShare" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v14"/></svg>
@@ -449,10 +483,11 @@
 
   <p class="foot">
     100% on-device · <b>no uploads, no servers, no storage</b><br>
-    Age estimates are a party trick, not a fact.
+    Typical error ≈4.5 years — a good guess, not a birth certificate.
   </p>
 </div>
 
+<div class="flashfx" id="flashfx" aria-hidden="true"></div>
 <input type="file" id="file" accept="image/*" hidden>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <p class="sr" id="live" role="status" aria-live="polite"></p>
@@ -498,8 +533,12 @@
     "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights",
     "https://raw.githubusercontent.com/vladmandic/face-api/master/model"
   ];
-  const MAX_EDGE   = 640;   // px the image is downscaled to before inference
-  const MIN_SUSPENSE = 2400; // ms of "Analyzing…" no matter how fast the model is
+  // Bigger source = more real detail survives in the extracted face crop, which is
+  // what the age net actually sees. Detectors resize internally, so this costs little.
+  const MAX_EDGE = 960;
+  const MIN_SUSPENSE = 1800;  // ms floor for "Analyzing…"; real inference usually exceeds it
+  const SMALL_FACE = 90;      // px of face width below which the read gets a caveat
+  const MODEL_MAE = 4.5;      // published mean absolute error of the age net, in years
 
   /* ── dom ────────────────────────────────────────────────────────────── */
   const $ = (id) => document.getElementById(id);
@@ -564,26 +603,54 @@
     }
   }
 
-  async function loadModels() {
+  // Tries every weight mirror in turn. Resolves false rather than throwing for the
+  // nets we can do without, so one dead CDN cannot take the whole app down.
+  async function loadNet(net, label) {
+    if (net.isLoaded) return true;
+    for (const base of MODEL_URLS) {
+      try { await net.loadFromUri(base); return true; }
+      catch (_) { /* next mirror */ }
+    }
+    console.warn("AgeLens: could not load " + label);
+    return false;
+  }
+
+  // Core = the smallest set that can produce a real answer (~800kb).
+  async function loadCore() {
     await loadLib();
     await pickBackend();
     const nets = faceapi.nets;
-    let last;
-    for (const base of MODEL_URLS) {
-      try {
-        if (!nets.tinyFaceDetector.isLoaded) await nets.tinyFaceDetector.loadFromUri(base);
-        if (!nets.ageGenderNet.isLoaded)     await nets.ageGenderNet.loadFromUri(base);
-        return;
-      } catch (e) { last = e; }
-    }
-    throw last || new Error("model weights unavailable");
+
+    setPill("loading", "Loading face detector…");
+    const detector = await loadNet(nets.tinyFaceDetector, "tinyFaceDetector");
+
+    setPill("loading", "Loading age model…");
+    const age = await loadNet(nets.ageGenderNet, "ageGenderNet");
+    if (!detector || !age) throw new Error("model weights unavailable");
+
+    // Landmarks are what let the age net run on an *aligned* face crop, which is how
+    // it was trained. Optional: without it we fall back to the raw detection box.
+    setPill("loading", "Loading face landmarks…");
+    await loadNet(nets.faceLandmark68Net, "faceLandmark68Net");
+  }
+
+  // Upgrade = the 5.4MB SSD MobileNet detector. Much tighter boxes than the tiny
+  // detector, so the crop handed to the age net is better framed. Loaded in the
+  // background; scans that happen before it lands just use the tiny detector.
+  async function loadUpgrade() {
+    const ok = await loadNet(faceapi.nets.ssdMobilenetv1, "ssdMobilenetv1");
+    if (ok && pill.dataset.state === "ready") setPill("ready", "High accuracy ready");
+    return ok;
   }
 
   let ready = null;
   function boot() {
     setPill("loading", "Waking the lens…");
-    ready = loadModels().then(
-      () => { setPill("ready", "Lens ready"); },
+    ready = loadCore().then(
+      () => {
+        setPill("ready", "Lens ready");
+        loadUpgrade().catch(() => {});   // never blocks, never fatal
+      },
       (err) => { setPill("failed", "Model failed — tap to retry"); throw err; }
     );
     // an unhandled rejection here is expected until someone actually scans
@@ -659,7 +726,8 @@
     stopCamera();
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 960 } },
+        // ask for a sharp frame — face detail is what the age net feeds on
+        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1440 } },
         audio: false
       });
       video.srcObject = stream;
@@ -668,6 +736,8 @@
       setView("cam");
       announce("Camera open");
       maybeShowFlip();
+      paintFlashButton();
+      updateCamHint();   // torch capability is only knowable once the track is live
     } catch (err) {
       const name = err && err.name;
       showError(name === "NotAllowedError" || name === "SecurityError" ? "denied" : "nocam");
@@ -682,39 +752,209 @@
     } catch (_) { /* keep it hidden */ }
   }
 
-  function shoot() {
+  /* ── flash ──────────────────────────────────────────────────────────── */
+  // Rear cameras usually expose a real torch. Front cameras never do, so the screen
+  // itself becomes the flash: a white burst held long enough for auto-exposure to
+  // settle before the frame is grabbed.
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const FLASH_MODES = ["off", "on", "auto"];
+  let flashMode = "off";
+
+  try {
+    const saved = localStorage.getItem("agelens.flash");
+    if (FLASH_MODES.includes(saved)) flashMode = saved;
+  } catch (_) { /* private mode; the default is fine */ }
+
+  function paintFlashButton() {
+    $("flashLabel").textContent = "Flash " + flashMode;
+    $("btnFlash").setAttribute("aria-pressed", String(flashMode !== "off"));
+  }
+
+  function cycleFlash() {
+    flashMode = FLASH_MODES[(FLASH_MODES.indexOf(flashMode) + 1) % FLASH_MODES.length];
+    try { localStorage.setItem("agelens.flash", flashMode); } catch (_) {}
+    paintFlashButton();
+    updateCamHint();
+  }
+
+  const torchTrack = () => {
+    const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities) return null;
+    try { return track.getCapabilities().torch ? track : null; }
+    catch (_) { return null; }
+  };
+
+  function updateCamHint() {
+    const hint = $("camHint");
+    if (flashMode === "off") { hint.textContent = "Centre your face, find some light, and shoot."; return; }
+    hint.textContent = torchTrack()
+      ? "Centre your face and shoot — the torch will fire."
+      : "Centre your face and shoot — the screen will flash to light you.";
+  }
+
+  // Average luminance of the live frame, 0–1. Drives "auto".
+  function frameLuma() {
+    try {
+      const c = document.createElement("canvas");
+      c.width = c.height = 32;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(video, 0, 0, 32, 32);
+      const d = ctx.getImageData(0, 0, 32, 32).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      return sum / (d.length / 4) / 255;
+    } catch (_) { return 1; }   // unreadable frame: assume bright, do not flash
+  }
+
+  let shooting = false;
+  async function shoot() {
+    if (shooting) return;
     if (!video.videoWidth) return showError("nocam");
-    try { render(video, facing === "user"); }
-    catch (_) { return showError("read"); }
+
+    const wants = flashMode === "on" || (flashMode === "auto" && frameLuma() < 0.35);
+    const track = wants ? torchTrack() : null;
+    const fx = $("flashfx");
+    shooting = true;
+    $("btnShoot").disabled = true;
+
+    try {
+      if (wants && track) {
+        try {
+          await track.applyConstraints({ advanced: [{ torch: true }] });
+          await wait(420);                 // let auto-exposure settle under the torch
+        } catch (_) { /* torch refused: shoot as-is rather than failing the capture */ }
+      } else if (wants) {
+        fx.classList.add("on");
+        await wait(340);                   // screen at full white, then expose
+      }
+
+      if (!video.videoWidth) throw new Error("stream ended");
+      render(video, facing === "user");
+    } catch (_) {
+      shooting = false;
+      $("btnShoot").disabled = false;
+      fx.classList.remove("on");
+      return showError("read");
+    } finally {
+      if (track) {
+        // turn the torch off *before* the track is stopped, or the constraint throws
+        try { await track.applyConstraints({ advanced: [{ torch: false }] }); } catch (_) {}
+      }
+      fx.classList.remove("on");
+    }
+
+    shooting = false;
+    $("btnShoot").disabled = false;
     stopCamera();
     analyze();
   }
 
   /* ── detection ──────────────────────────────────────────────────────── */
-  const PASSES = [
-    { inputSize: 416, scoreThreshold: 0.4 },
-    { inputSize: 608, scoreThreshold: 0.2 }   // second look for small / dim faces
-  ];
-
-  async function detect() {
-    for (const opts of PASSES) {
-      const found = await faceapi
-        .detectAllFaces(photoWork, new faceapi.TinyFaceDetectorOptions(opts))
-        .withAgeAndGender();
-      if (found && found.length) {
-        const sorted = found.slice().sort((a, b) => area(b.detection.box) - area(a.detection.box));
-        return { best: sorted[0], count: found.length };
-      }
-    }
-    return null;
-  }
   const area = (b) => (b.width || 0) * (b.height || 0);
+
+  // SSD MobileNet when it has arrived (tighter boxes), tiny detector otherwise.
+  // `loose` is the second, more forgiving attempt for small or dim faces.
+  function detectorOptions(loose) {
+    if (faceapi.nets.ssdMobilenetv1.isLoaded) {
+      return new faceapi.SsdMobilenetv1Options({ minConfidence: loose ? 0.2 : 0.45, maxResults: 12 });
+    }
+    return new faceapi.TinyFaceDetectorOptions({
+      inputSize: loose ? 608 : 512,
+      scoreThreshold: loose ? 0.2 : 0.4
+    });
+  }
+
+  // One full pass over a canvas. With landmarks loaded, face-api hands the age net an
+  // *aligned* crop (getRectForAlignment) instead of the raw box — the geometry it was
+  // trained on, and the single biggest accuracy win available here.
+  async function pass(canvas, loose) {
+    const aligned = faceapi.nets.faceLandmark68Net.isLoaded;
+    const task = faceapi.detectAllFaces(canvas, detectorOptions(loose));
+    return aligned
+      ? await task.withFaceLandmarks().withAgeAndGender()
+      : await task.withAgeAndGender();
+  }
+
+  const biggest = (list) =>
+    list.slice().sort((a, b) => area(b.detection.box) - area(a.detection.box))[0];
+
+  // Intersection-over-union, used to confirm the mirrored pass found the same face
+  // before its estimate is allowed into the average.
+  function iou(a, b) {
+    const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+    const x2 = Math.min(a.x + a.width, b.x + b.width);
+    const y2 = Math.min(a.y + a.height, b.y + b.height);
+    const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const union = area(a) + area(b) - inter;
+    return union > 0 ? inter / union : 0;
+  }
+
+  // Probability the face reads as male, so two samples can be averaged on one axis.
+  const maleProb = (r) => (r.gender === "male" ? r.genderProbability : 1 - r.genderProbability);
+
+  const mirrorCanvas = document.createElement("canvas");
+  function makeMirror(src) {
+    mirrorCanvas.width = src.width;
+    mirrorCanvas.height = src.height;
+    const ctx = mirrorCanvas.getContext("2d");
+    ctx.setTransform(-1, 0, 0, 1, src.width, 0);
+    ctx.drawImage(src, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return mirrorCanvas;
+  }
+
+  // Test-time augmentation: the same face is scored upright and mirrored, then averaged.
+  // A single forward pass is noisy; two views of the same face cancel some of that, and
+  // their disagreement is a genuine, per-photo signal of how confident the model is.
+  async function estimate() {
+    let found = await pass(photoWork, false);
+    if (!found || !found.length) found = await pass(photoWork, true);
+    if (!found || !found.length) return null;
+
+    const best = biggest(found);
+    const ages = [best.age];
+    const males = [maleProb(best)];
+
+    try {
+      const flipped = await pass(makeMirror(photoWork), false);
+      if (flipped && flipped.length) {
+        const other = biggest(flipped);
+        // un-mirror the box so it can be compared in the original coordinate space
+        const ob = other.detection.box;
+        const unflipped = {
+          x: photoWork.width - (ob.x + ob.width), y: ob.y, width: ob.width, height: ob.height
+        };
+        if (iou(best.detection.box, unflipped) > 0.5) {
+          ages.push(other.age);
+          males.push(maleProb(other));
+        }
+      }
+    } catch (_) { /* the mirrored view is a bonus, never a requirement */ }
+
+    const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const age = mean(ages);
+    const male = mean(males);
+    // Spread between views, floored by the net's published mean absolute error (4.54y)
+    // so the range never claims more precision than the model actually has.
+    const spread = ages.length > 1 ? Math.abs(ages[0] - ages[1]) : 0;
+    const margin = Math.max(MODEL_MAE, spread);
+
+    return {
+      age,
+      margin,
+      samples: ages.length,
+      gender: male >= 0.5 ? "male" : "female",
+      genderProbability: Math.max(male, 1 - male),
+      detection: best.detection,
+      count: found.length
+    };
+  }
 
   const STEPS = [
     "Locating a face",
-    "Mapping facial structure",
+    "Aligning facial landmarks",
     "Reading skin and shadow",
-    "Consulting the vibes"
+    "Cross-checking the mirror"
   ];
   function runSteps() {
     const el = $("workStep");
@@ -734,7 +974,7 @@
     let result = null, failure = null;
     try {
       await (ready || boot());
-      result = await detect();
+      result = await estimate();
     } catch (err) {
       failure = (err && /model|script|weights|fetch|network/i.test(String(err.message || err)))
         ? "model" : "engine";
@@ -805,22 +1045,46 @@
     }
   }
 
-  function showResult({ best, count }) {
-    const age = Math.max(1, Math.round(best.age));
-    const score = Math.round((best.detection.score || 0) * 100);
-    current = { age, score };
+  function showResult(r) {
+    const age = Math.max(1, Math.round(r.age));
+    const score = Math.round((r.detection.score || 0) * 100);
+    const lo = Math.max(1, Math.round(r.age - r.margin));
+    const hi = Math.round(r.age + r.margin);
+    const genderPct = Math.round(r.genderProbability * 100);
+    current = { age, lo, hi, gender: r.gender, genderPct, score };
 
     $("caption").textContent = "You look " + age + "!";
     $("quip").textContent = quipFor(age);
+    $("range").textContent = lo + "–" + hi;
     $("conf").textContent = score + "%";
+
+    // The model predicts gender too; shown as its read, with how sure it is.
+    const gChip = $("chipGender");
+    gChip.hidden = false;
+    $("gender").textContent = r.gender;
+    $("genderPct").textContent = genderPct + "%";
+
     const chip = $("chipFaces");
-    if (count > 1) { chip.hidden = false; chip.innerHTML = "<b>" + count + "</b> faces — scanning the closest"; }
+    if (r.count > 1) { chip.hidden = false; chip.innerHTML = "<b>" + r.count + "</b> faces — scanning the closest"; }
     else chip.hidden = true;
 
+    // Be upfront when the inputs were poor rather than dressing up a weak read.
+    const note = $("qualityNote");
+    const reasons = [];
+    if (r.detection.box.width < SMALL_FACE) reasons.push("the face is small in frame");
+    if (score < 60) reasons.push("the detection was borderline");
+    if (r.samples < 2) reasons.push("the mirrored cross-check did not agree");
+    if (reasons.length) {
+      note.hidden = false;
+      note.textContent = "Low-confidence read — " + reasons.join(" and ") +
+        ". Move closer, face the light and try again for a sharper estimate.";
+    } else note.hidden = true;
+
     setView("res");
-    drawBox(best.detection.box);
+    drawBox(r.detection.box);
     countTo($("ageNum"), age);
-    announce("The lens guessed " + age + " years old.");
+    announce("The lens guessed " + age + " years old, likely between " + lo + " and " + hi +
+             ". Predicted gender " + r.gender + ", " + genderPct + " percent confident.");
   }
 
   /* ── errors ─────────────────────────────────────────────────────────── */
@@ -846,8 +1110,10 @@
 
   /* ── sharing ────────────────────────────────────────────────────────── */
   function shareText() {
-    const age = current ? current.age : "??";
-    return "AgeLens says I look " + age + " 🔍 — how old do you look? " + location.href.split(/[?#]/)[0];
+    const url = location.href.split(/[?#]/)[0];
+    if (!current) return "AgeLens — how old do you look? " + url;
+    return "AgeLens says I look " + current.age + " (likely " + current.lo + "–" + current.hi +
+           ") 🔍 — how old do you look? " + url;
   }
 
   async function copyText(text) {
@@ -885,8 +1151,13 @@
     clearInterval(stepTimer);
     stopCamera();
     current = null;
+    shooting = false;
     fileInput.value = "";
+    $("btnShoot").disabled = false;
+    $("flashfx").classList.remove("on");
     $("ageNum").textContent = "0";
+    $("chipGender").hidden = true;
+    $("qualityNote").hidden = true;
     overlay.getContext("2d").clearRect(0, 0, overlay.width, overlay.height);
     setView("intro");
     if (pill.dataset.state === "failed") boot();   // give the model another chance
@@ -901,10 +1172,12 @@
   $("btnAgain").addEventListener("click", reset);
   $("btnRetry").addEventListener("click", reset);
   $("btnShare").addEventListener("click", share);
+  $("btnFlash").addEventListener("click", cycleFlash);
   $("btnFlip").addEventListener("click", () => {
     facing = facing === "user" ? "environment" : "user";
-    openCamera();
+    openCamera();   // re-checks torch capability for the newly selected camera
   });
+  paintFlashButton();
   fileInput.addEventListener("change", (e) => fromFile(e.target.files && e.target.files[0]));
 
   // drag & drop
