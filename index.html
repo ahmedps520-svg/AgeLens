@@ -209,12 +209,15 @@
   }
   #btnFlash[aria-pressed="true"] svg{fill:rgba(255,214,102,.28)}
 
-  /* full-screen white burst used as the front-camera flash */
+  /* Full-screen white burst used as the front-camera flash.
+     The transition lives on .on only, so removing the class snaps the overlay back to
+     transparent in a single repaint. A fade-out here would need the main thread to keep
+     servicing it, and the main thread is about to be busy with inference. */
   .flashfx{
     position:fixed; inset:0; z-index:60; pointer-events:none;
-    background:#fff; opacity:0; transition:opacity .1s linear;
+    background:#fff; opacity:0;
   }
-  .flashfx.on{opacity:.98}
+  .flashfx.on{opacity:.98; transition:opacity .08s linear}
 
   /* ── photo frame ────────────────────────────────────── */
   .frame{
@@ -304,6 +307,31 @@
     font-size:.76rem; line-height:1.45; color:#d8b26a; text-align:center; text-wrap:balance;
   }
 
+  /* calibration */
+  .chip-btn{
+    font-family:inherit; cursor:pointer;
+    color:#8fe3c4; border-color:rgba(121,230,176,.35); background:rgba(121,230,176,.09);
+  }
+  .chip-btn:hover{background:rgba(121,230,176,.16)}
+  .calib{text-align:center; margin:0 0 16px}
+  .linkbtn{
+    -webkit-appearance:none; appearance:none; border:0; background:none;
+    font:inherit; font-size:.78rem; font-weight:600; color:var(--muted);
+    text-decoration:underline; text-underline-offset:3px; cursor:pointer; padding:4px 6px;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .linkbtn:hover{color:var(--txt)}
+  .linkbtn:focus-visible{outline:2px solid var(--a1); outline-offset:2px; border-radius:6px}
+  .calibrow{display:flex; gap:8px; align-items:center; justify-content:center; flex-wrap:wrap}
+  .calibrow input{
+    -webkit-appearance:none; appearance:none;
+    width:112px; padding:11px 12px; font:inherit; font-size:.92rem; font-weight:700;
+    color:var(--txt); text-align:center;
+    background:rgba(255,255,255,.05); border:1px solid var(--line); border-radius:12px;
+  }
+  .calibrow input:focus{outline:2px solid var(--a1); outline-offset:2px}
+  .calibrow .btn{width:auto; flex:0 0 auto}
+
   /* ── error ──────────────────────────────────────────── */
   .oops{text-align:center; padding:16px 6px 4px}
   .oops .face{
@@ -344,7 +372,9 @@
   @media (max-height:740px){
     .tagline{display:none}
     .foot{font-size:.7rem; margin-top:14px}
-    #v-res .frame canvas{height:17svh}
+    #v-res .frame canvas{height:14svh}
+    #v-res .calib{margin-bottom:8px}
+    #v-res .linkbtn{font-size:.74rem}
     #v-res .verdict{padding:10px 4px 0}
     #v-res .age{font-size:clamp(3.4rem,17vw,4.6rem)}
     #v-res .caption{font-size:.98rem}
@@ -451,8 +481,21 @@
         <span class="chip" id="chipGender" hidden><b id="gender">—</b> <span id="genderPct" class="pct"></span></span>
         <span class="chip">Detection <b id="conf">—</b></span>
         <span class="chip" id="chipFaces" hidden></span>
+        <button class="chip chip-btn" id="chipCalib" type="button" hidden></button>
       </div>
       <p class="note" id="qualityNote" hidden></p>
+
+      <!-- The model has a known skew. Rather than silently fudging the number, let the
+           user set the correction themselves and always show that one is applied. -->
+      <div class="calib">
+        <button class="linkbtn" id="btnCalib" type="button">Reads wrong? Calibrate it</button>
+        <form class="calibrow" id="calibRow" hidden>
+          <label class="sr" for="realAge">Your actual age</label>
+          <input id="realAge" type="number" inputmode="numeric" min="1" max="120" placeholder="Actual age">
+          <button class="btn btn-sm btn-primary" id="btnCalibSave" type="submit">Set</button>
+          <button class="btn btn-sm btn-ghost" id="btnCalibCancel" type="button">Cancel</button>
+        </form>
+      </div>
       <div class="stack">
         <button class="btn btn-primary" id="btnShare" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v14"/></svg>
@@ -526,32 +569,48 @@
   } catch (_) { /* manifest is a nicety, never a blocker */ }
 
   /* ── config ─────────────────────────────────────────────────────────── */
+  // Primary engine: Human's FaceRes (blazeface -> facemesh -> faceres). A newer,
+  // better-regarded age/gender net than face-api's, at the cost of a much larger
+  // first download (~9MB of weights). face-api stays as an automatic fallback so a
+  // failure here degrades to the old behaviour instead of to a broken app.
+  const HUMAN_LIB_URLS = [
+    "https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js",
+    "https://unpkg.com/@vladmandic/human@3.3.6/dist/human.js"
+  ];
+  const HUMAN_MODEL_URLS = [
+    "https://cdn.jsdelivr.net/npm/@vladmandic/human-models/models/",
+    "https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/",
+    "https://cdn.jsdelivr.net/gh/vladmandic/human@main/models/",
+    "https://raw.githubusercontent.com/vladmandic/human/main/models/"
+  ];
+  const HUMAN_PROBE = "blazeface.json";
+
   const LIB_URLS = [
     "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js",
     "https://unpkg.com/@vladmandic/face-api@1.7.15/dist/face-api.js"
   ];
-  // Weight mirrors. These are probed at runtime (see resolveBase) instead of being
+  // Weight mirrors. These are probed at runtime (see probeBase) instead of being
   // trusted blindly: jsDelivr's /gh/ path needs a real git TAG, and the npm version
   // and git tags do not track each other in this project.
   const MODEL_URLS = [
-    "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model",
-    "https://cdn.jsdelivr.net/gh/vladmandic/face-api@1.7.12/model",
-    "https://raw.githubusercontent.com/vladmandic/face-api/master/model",
-    "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights"
+    "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/",
+    "https://cdn.jsdelivr.net/gh/vladmandic/face-api@1.7.12/model/",
+    "https://raw.githubusercontent.com/vladmandic/face-api/master/model/",
+    "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights/"
   ];
-  const PROBE_FILE = "/age_gender_model-weights_manifest.json";
+  const PROBE_FILE = "age_gender_model-weights_manifest.json";
 
-  const T_SCRIPT = 20000;   // ms to fetch the library
+  const T_SCRIPT = 20000;   // ms to fetch a library bundle
   const T_PROBE  = 7000;    // ms per mirror probe
-  const T_NET    = 45000;   // ms per neural net download
-  const T_TOTAL  = 60000;   // ms for a whole scan before we admit defeat
+  const T_NET    = 45000;   // ms per face-api net download
+  const T_HUMAN  = 75000;   // ms for Human's ~9MB model set before falling back
+  const T_TOTAL  = 120000;  // ms for a whole scan: a Human attempt plus a fallback
   // Bigger source = more real detail survives in the extracted face crop, which is
   // what the age net actually sees. Detectors resize internally, so this costs little.
   const MAX_EDGE = 720;
   const MIN_SUSPENSE = 1800;  // ms floor for "Analyzing…"; real inference usually exceeds it
   const TTA_BUDGET = 1500;    // if the first pass is slower than this, skip the mirror pass
   const SMALL_FACE = 90;      // px of face width below which the read gets a caveat
-  const MODEL_MAE = 4.5;      // published mean absolute error of the age net, in years
 
   /* ── dom ────────────────────────────────────────────────────────────── */
   const $ = (id) => document.getElementById(id);
@@ -609,37 +668,40 @@
     });
   }
 
-  async function loadLib() {
-    if (window.faceapi) return;
+  async function loadAnyScript(urls, ready, label) {
+    if (ready()) return;
     let last;
-    for (const url of LIB_URLS) {
+    for (const url of urls) {
       try {
-        await withTimeout(loadScript(url), T_SCRIPT, "library");
-        if (window.faceapi) return;
+        await withTimeout(loadScript(url), T_SCRIPT, label);
+        if (ready()) return;
       } catch (e) { last = e; }
     }
-    throw last || new Error("face-api.js unavailable");
+    throw last || new Error(label + " unavailable");
   }
+  const loadLib = () => loadAnyScript(LIB_URLS, () => !!window.faceapi, "face-api");
 
   // Find a mirror that actually serves weights, by asking for one small manifest.
   // Cheaper and far more predictable than discovering a dead mirror separately for
-  // each of four nets, and it survives a CDN path going stale.
-  let modelBase = null;
-  async function resolveBase() {
-    if (modelBase) return modelBase;
+  // each net, and it survives a CDN path going stale.
+  const probeCache = {};
+  async function probeBase(bases, file, key) {
+    if (probeCache[key]) return probeCache[key];
     let last;
-    for (const base of MODEL_URLS) {
+    for (const base of bases) {
       try {
-        const res = await withTimeout(fetch(base + PROBE_FILE), T_PROBE, "probe " + base);
+        const res = await withTimeout(fetch(base + file), T_PROBE, "probe " + base);
         if (!res.ok) throw new Error("HTTP " + res.status);
         await res.json();            // a 404 HTML page fails here, a real manifest does not
-        modelBase = base;
+        probeCache[key] = base;
         return base;
       } catch (e) { last = e; }
     }
     // always mention the mirror so the failure is reported as a model problem
-    throw new Error("no reachable weight mirror (" + ((last && last.message) || "unknown") + ")");
+    throw new Error("no reachable " + key + " model mirror (" +
+                    ((last && last.message) || "unknown") + ")");
   }
+  const resolveBase = () => probeBase(MODEL_URLS, PROBE_FILE, "faceapi");
 
   async function pickBackend() {
     const tf = window.faceapi && window.faceapi.tf;
@@ -668,48 +730,168 @@
   let loadStage = "";
   const setStage = (text) => { loadStage = text; setPill("loading", text); paintStep(); };
 
-  // Core = the smallest set that can produce a real answer (~800kb).
-  async function loadCore() {
-    setStage("Fetching the engine…");
-    await loadLib();
-    await pickBackend();
-    const nets = faceapi.nets;
+  /* ── engines ────────────────────────────────────────────────────────────
+     Both engines normalise to the same face record so everything downstream —
+     mirror ensembling, the IoU gate, calibration, the overlay — is engine-agnostic:
+       { age, maleProb, score, box:{x,y,width,height} }                        */
 
-    setStage("Finding a model mirror…");
-    await resolveBase();
+  const HumanEngine = {
+    id: "human",
+    name: "Human FaceRes",
+    mae: 4.0,
+    human: null,
 
-    setStage("Downloading face detector…");
-    const detector = await loadNet(nets.tinyFaceDetector, "tinyFaceDetector");
+    async load() {
+      setStage("Fetching the engine…");
+      await loadAnyScript(HUMAN_LIB_URLS, () => !!window.Human, "Human");
 
-    setStage("Downloading age model…");
-    const age = await loadNet(nets.ageGenderNet, "ageGenderNet");
-    if (!detector || !age) throw new Error("model weights unavailable");
+      setStage("Finding a model mirror…");
+      const base = await probeBase(HUMAN_MODEL_URLS, HUMAN_PROBE, "human");
 
-    // Landmarks are what let the age net run on an *aligned* face crop, which is how
-    // it was trained. Optional: without it we fall back to the raw detection box.
-    setStage("Downloading face landmarks…");
-    await loadNet(nets.faceLandmark68Net, "faceLandmark68Net");
-    loadStage = "";
-  }
+      setStage("Downloading face models (~9MB, once)…");
+      this.human = new window.Human.Human({
+        backend: "webgl",
+        modelBasePath: base,
+        debug: false,
+        warmup: "none",
+        cacheSensitivity: 0,        // still photos: never reuse a previous frame's result
+        filter: { enabled: false },
+        gesture: { enabled: false },
+        body: { enabled: false },
+        hand: { enabled: false },
+        object: { enabled: false },
+        segmentation: { enabled: false },
+        face: {
+          enabled: true,
+          detector: { enabled: true, maxDetected: 8, minConfidence: 0.2,
+                      rotation: true, skipFrames: 0, skipTime: 0, return: false },
+          mesh: { enabled: true },       // feeds the aligned crop faceres expects
+          iris: { enabled: false },
+          attention: { enabled: false },
+          description: { enabled: true },// this is the age / gender / descriptor net
+          emotion: { enabled: false },
+          antispoof: { enabled: false },
+          liveness: { enabled: false }
+        }
+      });
+      await withTimeout(this.human.load(), T_HUMAN, "Human models");
+      // a warmup pass compiles shaders now instead of during the user's first scan
+      try { await withTimeout(this.human.warmup(), 30000, "warmup"); } catch (_) {}
+      loadStage = "";
+    },
 
-  // Upgrade = the 5.4MB SSD MobileNet detector. Tighter boxes than the tiny detector,
-  // so the age net gets a better-framed crop. Deliberately NOT started at boot: it
-  // would compete for bandwidth with the first scan on a phone. It begins only once
-  // a result is on screen, and any scan before it lands just uses the tiny detector.
+    async detect(canvas) {
+      const res = await this.human.detect(canvas);
+      return (res && res.face ? res.face : [])
+        .filter((f) => typeof f.age === "number" && isFinite(f.age) && f.box)
+        .map((f) => ({
+          age: f.age,
+          // 'unknown' gender carries no information, so treat it as a coin flip
+          maleProb: f.gender === "male" ? (f.genderScore || 0.5)
+                  : f.gender === "female" ? 1 - (f.genderScore || 0.5) : 0.5,
+          hasGender: f.gender === "male" || f.gender === "female",
+          score: f.faceScore || f.score || f.boxScore || 0,
+          box: { x: f.box[0], y: f.box[1], width: f.box[2], height: f.box[3] }
+        }));
+    }
+  };
+
+  const FaceApiEngine = {
+    id: "faceapi",
+    name: "face-api AgeGenderNet",
+    mae: 4.54,
+
+    async load() {
+      setStage("Fetching the engine…");
+      await loadLib();
+      await pickBackend();
+      const nets = faceapi.nets;
+
+      setStage("Finding a model mirror…");
+      await resolveBase();
+
+      setStage("Downloading face detector…");
+      const detector = await loadNet(nets.tinyFaceDetector, "tinyFaceDetector");
+      setStage("Downloading age model…");
+      const age = await loadNet(nets.ageGenderNet, "ageGenderNet");
+      if (!detector || !age) throw new Error("model weights unavailable");
+
+      setStage("Downloading face landmarks…");
+      await loadNet(nets.faceLandmark68Net, "faceLandmark68Net");
+      loadStage = "";
+      startUpgrade();
+    },
+
+    options(loose) {
+      if (faceapi.nets.ssdMobilenetv1.isLoaded) {
+        return new faceapi.SsdMobilenetv1Options({ minConfidence: loose ? 0.2 : 0.45, maxResults: 12 });
+      }
+      return new faceapi.TinyFaceDetectorOptions({
+        inputSize: loose ? 608 : 512, scoreThreshold: loose ? 0.2 : 0.4
+      });
+    },
+
+    async detect(canvas, loose) {
+      const task = faceapi.detectAllFaces(canvas, this.options(loose));
+      const found = faceapi.nets.faceLandmark68Net.isLoaded
+        ? await task.withFaceLandmarks().withAgeAndGender()
+        : await task.withAgeAndGender();
+      return (found || []).map((f) => ({
+        age: f.age,
+        maleProb: f.gender === "male" ? f.genderProbability : 1 - f.genderProbability,
+        hasGender: true,
+        score: f.detection.score || 0,
+        box: {
+          x: f.detection.box.x, y: f.detection.box.y,
+          width: f.detection.box.width, height: f.detection.box.height
+        }
+      }));
+    }
+  };
+
+  // The 5.4MB SSD detector, only relevant to the fallback engine.
   let upgradeStarted = false;
   function startUpgrade() {
     if (upgradeStarted || !window.faceapi) return;
     upgradeStarted = true;
-    loadNet(faceapi.nets.ssdMobilenetv1, "ssdMobilenetv1").then((ok) => {
-      if (ok && pill.dataset.state === "ready") setPill("ready", "High accuracy ready");
-    }).catch(() => {});
+    loadNet(faceapi.nets.ssdMobilenetv1, "ssdMobilenetv1").catch(() => {});
   }
 
+  let engine = null;
   let ready = null;
+
+  // The better model costs ~9MB. Pushing that down a metered or 2g connection is a
+  // bad trade the user did not agree to, so those cases start on the small model.
+  function preferLightModel() {
+    const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (!c) return false;
+    if (c.saveData) return true;
+    return c.effectiveType === "2g" || c.effectiveType === "slow-2g";
+  }
+
+  // Human first; if anything about it fails, fall back rather than leaving the user
+  // with nothing. The fallback is the exact pipeline that shipped before.
+  async function loadEngine() {
+    if (!preferLightModel()) {
+      try {
+        await HumanEngine.load();
+        engine = HumanEngine;
+        return;
+      } catch (err) {
+        console.warn("AgeLens: Human engine unavailable, falling back to face-api —", err);
+      }
+      setStage("Switching to backup model…");
+    }
+    await FaceApiEngine.load();
+    engine = FaceApiEngine;
+  }
+
   function boot() {
     setPill("loading", "Waking the lens…");
-    ready = loadCore().then(
-      () => { setPill("ready", "Lens ready"); },
+    ready = loadEngine().then(
+      () => {
+        setPill("ready", engine === HumanEngine ? "Lens ready" : "Ready (backup model)");
+      },
       (err) => { setPill("failed", "Model failed — tap to retry"); throw err; }
     );
     // an unhandled rejection here is expected until someone actually scans
@@ -816,8 +998,29 @@
   // itself becomes the flash: a white burst held long enough for auto-exposure to
   // settle before the frame is grabbed.
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Resolves once the browser has actually painted. TF.js runs on the main thread and can
+  // block it for seconds, so anything that must be *visible* first has to wait for a real
+  // frame — otherwise the style change is applied but never makes it to the screen.
+  const nextPaint = () => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))));
+
   const FLASH_MODES = ["off", "on", "auto"];
   let flashMode = "off";
+  let flashTimer = null;
+
+  // Every path out of a capture funnels through here, plus a failsafe timer, so the white
+  // overlay cannot outlive the shot no matter which branch or error path we took.
+  function flashOn() {
+    clearTimeout(flashTimer);
+    $("flashfx").classList.add("on");
+    flashTimer = setTimeout(flashOff, 2500);
+  }
+  function flashOff() {
+    clearTimeout(flashTimer);
+    flashTimer = null;
+    $("flashfx").classList.remove("on");
+  }
 
   try {
     const saved = localStorage.getItem("agelens.flash");
@@ -872,7 +1075,7 @@
 
     const wants = flashMode === "on" || (flashMode === "auto" && frameLuma() < 0.35);
     const track = wants ? torchTrack() : null;
-    const fx = $("flashfx");
+    const screenFlash = wants && !track;
     shooting = true;
     $("btnShoot").disabled = true;
 
@@ -882,9 +1085,10 @@
           await track.applyConstraints({ advanced: [{ torch: true }] });
           await wait(420);                 // let auto-exposure settle under the torch
         } catch (_) { /* torch refused: shoot as-is rather than failing the capture */ }
-      } else if (wants) {
-        fx.classList.add("on");
-        await wait(340);                   // screen at full white, then expose
+      } else if (screenFlash) {
+        flashOn();
+        await nextPaint();                 // make sure the white is really on screen
+        await wait(340);                   // then hold it while the sensor adjusts
       }
 
       if (!video.videoWidth) throw new Error("stream ended");
@@ -892,15 +1096,19 @@
     } catch (_) {
       shooting = false;
       $("btnShoot").disabled = false;
-      fx.classList.remove("on");
+      flashOff();
       return showError("read");
     } finally {
       if (track) {
         // turn the torch off *before* the track is stopped, or the constraint throws
         try { await track.applyConstraints({ advanced: [{ torch: false }] }); } catch (_) {}
       }
-      fx.classList.remove("on");
+      flashOff();
     }
+
+    // Clearing the class is not enough: analyze() blocks the main thread, and an unpainted
+    // style change would leave the screen white for the whole scan. Wait for a real frame.
+    if (screenFlash) await nextPaint();
 
     shooting = false;
     $("btnShoot").disabled = false;
@@ -911,31 +1119,10 @@
   /* ── detection ──────────────────────────────────────────────────────── */
   const area = (b) => (b.width || 0) * (b.height || 0);
 
-  // SSD MobileNet when it has arrived (tighter boxes), tiny detector otherwise.
-  // `loose` is the second, more forgiving attempt for small or dim faces.
-  function detectorOptions(loose) {
-    if (faceapi.nets.ssdMobilenetv1.isLoaded) {
-      return new faceapi.SsdMobilenetv1Options({ minConfidence: loose ? 0.2 : 0.45, maxResults: 12 });
-    }
-    return new faceapi.TinyFaceDetectorOptions({
-      inputSize: loose ? 608 : 512,
-      scoreThreshold: loose ? 0.2 : 0.4
-    });
-  }
-
-  // One full pass over a canvas. With landmarks loaded, face-api hands the age net an
-  // *aligned* crop (getRectForAlignment) instead of the raw box — the geometry it was
-  // trained on, and the single biggest accuracy win available here.
-  async function pass(canvas, loose) {
-    const aligned = faceapi.nets.faceLandmark68Net.isLoaded;
-    const task = faceapi.detectAllFaces(canvas, detectorOptions(loose));
-    return aligned
-      ? await task.withFaceLandmarks().withAgeAndGender()
-      : await task.withAgeAndGender();
-  }
+  const pass = (canvas, loose) => engine.detect(canvas, loose);
 
   const biggest = (list) =>
-    list.slice().sort((a, b) => area(b.detection.box) - area(a.detection.box))[0];
+    list.slice().sort((a, b) => area(b.box) - area(a.box))[0];
 
   // Intersection-over-union, used to confirm the mirrored pass found the same face
   // before its estimate is allowed into the average.
@@ -947,9 +1134,6 @@
     const union = area(a) + area(b) - inter;
     return union > 0 ? inter / union : 0;
   }
-
-  // Probability the face reads as male, so two samples can be averaged on one axis.
-  const maleProb = (r) => (r.gender === "male" ? r.genderProbability : 1 - r.genderProbability);
 
   const mirrorCanvas = document.createElement("canvas");
   function makeMirror(src) {
@@ -979,7 +1163,8 @@
 
     const best = biggest(found);
     const ages = [best.age];
-    const males = [maleProb(best)];
+    const males = [best.maleProb];
+    let hasGender = best.hasGender;
 
     // The mirrored cross-check doubles the work. On a device where one pass already
     // took a while, a second one is the difference between "slow" and "broken", and
@@ -992,13 +1177,14 @@
         if (flipped && flipped.length) {
           const other = biggest(flipped);
           // un-mirror the box so it can be compared in the original coordinate space
-          const ob = other.detection.box;
+          const ob = other.box;
           const unflipped = {
             x: photoWork.width - (ob.x + ob.width), y: ob.y, width: ob.width, height: ob.height
           };
-          if (iou(best.detection.box, unflipped) > 0.5) {
+          if (iou(best.box, unflipped) > 0.5) {
             ages.push(other.age);
-            males.push(maleProb(other));
+            males.push(other.maleProb);
+            hasGender = hasGender || other.hasGender;
           }
         }
       } catch (_) { /* the mirrored view is a bonus, never a requirement */ }
@@ -1007,19 +1193,21 @@
     const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
     const age = mean(ages);
     const male = mean(males);
-    // Spread between views, floored by the net's published mean absolute error (4.54y)
+    // Spread between views, floored by the active net's published mean absolute error
     // so the range never claims more precision than the model actually has.
     const spread = ages.length > 1 ? Math.abs(ages[0] - ages[1]) : 0;
-    const margin = Math.max(MODEL_MAE, spread);
+    const margin = Math.max(engine.mae, spread);
 
     return {
       age,
       margin,
       samples: ages.length,
       mirrorSkipped: skipped,   // skipped for speed is not the same as disagreed
+      hasGender,
       gender: male >= 0.5 ? "male" : "female",
       genderProbability: Math.max(male, 1 - male),
-      detection: best.detection,
+      score: best.score,
+      box: best.box,
       count: found.length
     };
   }
@@ -1063,6 +1251,9 @@
 
     let result = null, failure = null;
     try {
+      // Let the analyzing screen paint before inference seizes the main thread, or the
+      // user stares at the previous frame for the whole scan.
+      await nextPaint();
       // One bound over the whole scan: no combination of a stalled download and a
       // slow device can leave this screen spinning indefinitely.
       result = await withTimeout((async () => {
@@ -1085,7 +1276,6 @@
     if (failure) return showError(failure);
     if (!result) return showError("noface");
     showResult(result);
-    startUpgrade();                     // fetch the better detector now, not before
   }
 
   /* ── result ─────────────────────────────────────────────────────────── */
@@ -1145,13 +1335,47 @@
     }
   }
 
+  /* ── calibration ────────────────────────────────────────────────────── */
+  // face-api's age net has a documented ~4.5y mean error and a known tendency to read
+  // some faces old. There is no honest way to guess a correction, so the user sets it:
+  // one real age, stored locally, applied as a stated offset that is always visible.
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const MAX_OFFSET = 30;
+  let ageOffset = 0;
+  try {
+    const saved = parseFloat(localStorage.getItem("agelens.offset"));
+    if (isFinite(saved)) ageOffset = clamp(saved, -MAX_OFFSET, MAX_OFFSET);
+  } catch (_) { /* private mode */ }
+
+  function setOffset(v) {
+    ageOffset = clamp(v, -MAX_OFFSET, MAX_OFFSET);
+    try {
+      if (ageOffset) localStorage.setItem("agelens.offset", String(ageOffset));
+      else localStorage.removeItem("agelens.offset");
+    } catch (_) {}
+  }
+
+  let lastResult = null;   // kept so calibrating can re-render without re-scanning
+
   function showResult(r) {
-    const age = Math.max(1, Math.round(r.age));
-    const score = Math.round((r.detection.score || 0) * 100);
-    const lo = Math.max(1, Math.round(r.age - r.margin));
-    const hi = Math.round(r.age + r.margin);
+    lastResult = r;
+    const rawAge = Math.max(1, Math.round(r.age));
+    const age = clamp(Math.round(r.age + ageOffset), 1, 120);
+    const score = Math.round((r.score || 0) * 100);
+    const lo = clamp(Math.round(r.age - r.margin + ageOffset), 1, 120);
+    const hi = clamp(Math.round(r.age + r.margin + ageOffset), 1, 120);
     const genderPct = Math.round(r.genderProbability * 100);
-    current = { age, lo, hi, gender: r.gender, genderPct, score };
+    current = { age, rawAge, lo, hi, gender: r.gender, genderPct, score };
+
+    // never hide that an adjustment is in play — show it, and what the model actually said
+    const calibChip = $("chipCalib");
+    if (ageOffset) {
+      calibChip.hidden = false;
+      calibChip.textContent = "Calibrated " + (ageOffset > 0 ? "+" : "−") +
+        Math.abs(Math.round(ageOffset)) + " yrs · model said " + rawAge + " · reset";
+    } else calibChip.hidden = true;
+    $("calibRow").hidden = true;
+    $("btnCalib").hidden = false;
 
     $("caption").textContent = "You look " + age + "!";
     $("quip").textContent = quipFor(age);
@@ -1159,10 +1383,13 @@
     $("conf").textContent = score + "%";
 
     // The model predicts gender too; shown as its read, with how sure it is.
+    // Human can return 'unknown', in which case there is nothing worth showing.
     const gChip = $("chipGender");
-    gChip.hidden = false;
-    $("gender").textContent = r.gender;
-    $("genderPct").textContent = genderPct + "%";
+    gChip.hidden = !r.hasGender;
+    if (r.hasGender) {
+      $("gender").textContent = r.gender;
+      $("genderPct").textContent = genderPct + "%";
+    }
 
     const chip = $("chipFaces");
     if (r.count > 1) { chip.hidden = false; chip.innerHTML = "<b>" + r.count + "</b> faces — scanning the closest"; }
@@ -1171,7 +1398,7 @@
     // Be upfront when the inputs were poor rather than dressing up a weak read.
     const note = $("qualityNote");
     const reasons = [];
-    if (r.detection.box.width < SMALL_FACE) reasons.push("the face is small in frame");
+    if (r.box.width < SMALL_FACE) reasons.push("the face is small in frame");
     if (score < 60) reasons.push("the detection was borderline");
     if (r.samples < 2 && !r.mirrorSkipped) reasons.push("the mirrored cross-check did not agree");
     if (reasons.length) {
@@ -1181,7 +1408,7 @@
     } else note.hidden = true;
 
     setView("res");
-    drawBox(r.detection.box);
+    drawBox(r.box);
     countTo($("ageNum"), age);
     announce("The lens guessed " + age + " years old, likely between " + lo + " and " + hi +
              ". Predicted gender " + r.gender + ", " + genderPct + " percent confident.");
@@ -1254,10 +1481,13 @@
     pipelineStep = "";
     stopCamera();
     current = null;
+    lastResult = null;
     shooting = false;
     fileInput.value = "";
+    $("calibRow").hidden = true;
+    $("btnCalib").hidden = false;
     $("btnShoot").disabled = false;
-    $("flashfx").classList.remove("on");
+    flashOff();
     $("ageNum").textContent = "0";
     $("chipGender").hidden = true;
     $("qualityNote").hidden = true;
@@ -1276,6 +1506,36 @@
   $("btnAgain").addEventListener("click", reset);
   $("btnRetry").addEventListener("click", reset);
   $("btnShare").addEventListener("click", share);
+  // calibration controls
+  $("btnCalib").addEventListener("click", () => {
+    $("btnCalib").hidden = true;
+    $("calibRow").hidden = false;
+    const input = $("realAge");
+    input.value = current ? String(current.age) : "";
+    input.focus();
+    input.select();
+  });
+  $("btnCalibCancel").addEventListener("click", () => {
+    $("calibRow").hidden = true;
+    $("btnCalib").hidden = false;
+  });
+  $("calibRow").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const actual = parseInt($("realAge").value, 10);
+    if (!isFinite(actual) || actual < 1 || actual > 120) return toast("Enter an age between 1 and 120");
+    if (!lastResult) return;
+    const wanted = actual - lastResult.age;          // offset against the raw model output
+    setOffset(wanted);
+    if (Math.abs(wanted) > MAX_OFFSET) toast("Capped at " + MAX_OFFSET + " years");
+    showResult(lastResult);
+    toast(ageOffset ? "Calibrated — future scans use this" : "Calibration cleared");
+  });
+  $("chipCalib").addEventListener("click", () => {
+    setOffset(0);
+    if (lastResult) showResult(lastResult);
+    toast("Calibration cleared");
+  });
+
   $("btnFlash").addEventListener("click", cycleFlash);
   $("btnFlip").addEventListener("click", () => {
     facing = facing === "user" ? "environment" : "user";
